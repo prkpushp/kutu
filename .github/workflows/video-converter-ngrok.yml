@@ -1,0 +1,156 @@
+name: Temporary 16:9 -> 9:16 Converter (Stable ngrok URL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_alive_minutes:
+        description: "Keep the URL alive for N minutes"
+        required: true
+        default: "45"
+
+jobs:
+  serve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Flask
+        run: |
+          python -m pip install --upgrade pip
+          pip install flask
+
+      - name: Create app (upload -> ffmpeg -> download)
+        run: |
+          cat > app.py << 'PY'
+          import os, subprocess, uuid
+          from flask import Flask, request, send_file, abort
+
+          app = Flask(__name__)
+          AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
+          WORKDIR = os.environ.get("WORKDIR", "/tmp/work")
+          os.makedirs(WORKDIR, exist_ok=True)
+
+          HTML = """<!doctype html>
+          <html>
+            <head><meta charset="utf-8"><title>Video Converter</title></head>
+            <body>
+              <h3>16:9 → 9:16 (center crop)</h3>
+              <form action="/convert" method="post" enctype="multipart/form-data">
+                <input type="password" name="token" placeholder="Token" required />
+                <input type="file" name="video" accept="video/*" required />
+                <button type="submit">Convert</button>
+              </form>
+            </body>
+          </html>"""
+
+          @app.get("/")
+          def index():
+            return HTML
+
+          @app.post("/convert")
+          def convert():
+            token = request.form.get("token", "")
+            if AUTH_TOKEN and token != AUTH_TOKEN:
+              abort(401)
+
+            f = request.files.get("video")
+            if not f:
+              abort(400, "No file uploaded")
+
+            job = str(uuid.uuid4())
+            in_path = os.path.join(WORKDIR, f"in_{job}.mp4")
+            out_path = os.path.join(WORKDIR, f"out_{job}.mp4")
+            f.save(in_path)
+
+            cmd = [
+              "ffmpeg", "-y",
+              "-i", in_path,
+              "-vf", "crop=ih*9/16:ih,scale=1080:1920",
+              "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+              "-c:a", "aac", "-b:a", "128k",
+              out_path
+            ]
+            subprocess.run(cmd, check=True)
+            return send_file(out_path, as_attachment=True, download_name="converted_9x16.mp4")
+
+          if __name__ == "__main__":
+            app.run(host="0.0.0.0", port=8080)
+          PY
+
+      - name: Start server (background)
+        env:
+          AUTH_TOKEN: ${{ secrets.CONVERTER_TOKEN }}
+          WORKDIR: /tmp/work
+        run: |
+          nohup python app.py > server.log 2>&1 &
+          sleep 1
+          curl -fsS http://127.0.0.1:8080/ >/dev/null
+
+      - name: Download ngrok
+        run: |
+          curl -L -o ngrok.tgz https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+          tar -xzf ngrok.tgz
+          ./ngrok version
+
+      - name: Configure ngrok authtoken
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          ./ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+
+      - name: Start ngrok with your dev domain
+        env:
+          NGROK_DOMAIN: ${{ secrets.NGROK_DOMAIN }}
+        run: |
+          nohup ./ngrok http 8080 --url="$NGROK_DOMAIN" --log=stdout > ngrok.log 2>&1 &
+          sleep 2
+
+      - name: Print URL
+        env:
+          NGROK_DOMAIN: ${{ secrets.NGROK_DOMAIN }}
+        run: |
+          echo "Open this URL: https://$NGROK_DOMAIN"
+          echo "It will stay up for ~${{ inputs.keep_alive_minutes }} minutes."
+
+      - name: Health check (retry)
+        env:
+          NGROK_DOMAIN: ${{ secrets.NGROK_DOMAIN }}
+        run: |
+          set -e
+          url="https://$NGROK_DOMAIN"
+          for i in $(seq 1 30); do
+            code="$(curl -sS -o /dev/null -m 10 -w '%{http_code}' "$url" || true)"
+            echo "Attempt $i: HTTP $code"
+            if [ "$code" != "000" ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Health check failed"
+          tail -200 ngrok.log || true
+          exit 1
+
+      - name: Debug logs (always)
+        if: always()
+        run: |
+          echo "==== server.log (last 200) ===="
+          tail -200 server.log || true
+          echo "==== ngrok.log (last 200) ===="
+          tail -200 ngrok.log || true
+
+      - name: Keep alive
+        run: |
+          timeout ${{ inputs.keep_alive_minutes }}m sleep 7200
