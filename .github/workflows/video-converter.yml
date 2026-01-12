@@ -1,0 +1,129 @@
+name: Temporary Video Converter (16:9 -> 9:16)
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_alive_minutes:
+        description: "How long to keep the public URL alive"
+        required: true
+        default: "45"
+      auth_token:
+        description: "Simple shared token (also store in secrets if preferred)"
+        required: true
+        default: "changeme"
+
+jobs:
+  serve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install server deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install flask
+
+      - name: Create minimal web app
+        run: |
+          cat > app.py << 'PY'
+          import os
+          import subprocess
+          import uuid
+          from flask import Flask, request, send_file, abort
+
+          app = Flask(__name__)
+
+          AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
+          WORKDIR = os.environ.get("WORKDIR", "/tmp/work")
+          os.makedirs(WORKDIR, exist_ok=True)
+
+          HTML = """<!doctype html>
+          <html>
+            <head><meta charset="utf-8"><title>16:9 to 9:16 Converter</title></head>
+            <body>
+              <h3>16:9 → 9:16 (center crop)</h3>
+              <form action="/convert" method="post" enctype="multipart/form-data">
+                <input type="password" name="token" placeholder="Token" required />
+                <input type="file" name="video" accept="video/*" required />
+                <button type="submit">Convert</button>
+              </form>
+              <p>Tip: Keep videos short (~1 min) for faster processing.</p>
+            </body>
+          </html>"""
+
+          @app.get("/")
+          def index():
+            return HTML
+
+          @app.post("/convert")
+          def convert():
+            token = request.form.get("token", "")
+            if AUTH_TOKEN and token != AUTH_TOKEN:
+              abort(401)
+
+            f = request.files.get("video")
+            if not f:
+              abort(400, "No file uploaded")
+
+            job_id = str(uuid.uuid4())
+            in_path = os.path.join(WORKDIR, f"in_{job_id}.mp4")
+            out_path = os.path.join(WORKDIR, f"out_{job_id}.mp4")
+            f.save(in_path)
+
+            # Convert 16:9 -> 9:16 by center-cropping to 9:16 and scaling to 1080x1920.
+            # crop=ih*9/16:ih -> make width = height*9/16 (portrait crop), keep full height, centered.
+            cmd = [
+              "ffmpeg", "-y",
+              "-i", in_path,
+              "-vf", "crop=ih*9/16:ih,scale=1080:1920",
+              "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+              "-c:a", "aac", "-b:a", "128k",
+              out_path
+            ]
+
+            subprocess.run(cmd, check=True)
+
+            return send_file(out_path, as_attachment=True, download_name="converted_9x16.mp4")
+
+          if __name__ == "__main__":
+            app.run(host="0.0.0.0", port=8080)
+          PY
+
+      - name: Start web server (background)
+        env:
+          AUTH_TOKEN: ${{ inputs.auth_token }}
+          WORKDIR: /tmp/work
+        run: |
+          nohup python app.py > server.log 2>&1 &
+          sleep 1
+          curl -fsS http://127.0.0.1:8080/ >/dev/null
+
+      - name: Expose public tunnel URL
+        uses: codetalkio/expose-tunnel@v1.5.0
+        id: expose-tunnel
+        with:
+          service: bore.pub
+          port: 8080
+        # This action supports services like bore.pub/localhost.run and exposes tunnel-url as an output. [page:1]
+
+      - name: Show URL in logs
+        run: |
+          echo "Open this URL: ${{ steps.expose-tunnel.outputs.tunnel-url }}"
+          echo "It will stay up for ~${{ inputs.keep_alive_minutes }} minutes."
+
+      - name: Keep tunnel alive
+        run: |
+          timeout ${{ inputs.keep_alive_minutes }}m sleep 7200
