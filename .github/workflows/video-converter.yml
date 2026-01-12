@@ -118,7 +118,7 @@ jobs:
           # Important: localhost.run banner includes a Twitter link; ignore it by only
           # accepting *.lhr.life or *.localhost.run URLs. [web:45]
           for i in $(seq 1 90); do
-            url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.(lhr\.life|localhost\.run)' tunnel.log | head -n 1 || true)"
+            url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.lhr\.life' tunnel.log | head -n 1 || true)"
             if [ -n "$url" ]; then
               echo "url=$url" >> "$GITHUB_OUTPUT"
               echo "Tunnel URL: $url"
@@ -126,6 +126,7 @@ jobs:
             fi
             sleep 1
           done
+
 
           echo "Failed to obtain tunnel URL. Last tunnel.log lines:" >&2
           tail -200 tunnel.log >&2
