@@ -103,13 +103,13 @@ jobs:
           sleep 1
           curl -fsS http://127.0.0.1:8080/ >/dev/null
 
-      - name: Expose public URL (with fallback)
+      - name: Expose public URL
         uses: codetalkio/expose-tunnel@v1.5.0
         id: expose-tunnel
         with:
-          service: bore.pub
+          service: localhost.run
           port: 8080
-          fallback: '["localhost.run","bore.pub"]'
+
 
       - name: Print URL
         run: |
