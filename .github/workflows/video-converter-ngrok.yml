@@ -6,7 +6,7 @@ on:
       keep_alive_minutes:
         description: "Keep the URL alive for N minutes"
         required: true
-        default: "45"
+        default: "240"
 
 jobs:
   serve:
