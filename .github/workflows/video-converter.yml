@@ -76,7 +76,6 @@ jobs:
             out_path = os.path.join(WORKDIR, f"out_{job}.mp4")
             f.save(in_path)
 
-            # 16:9 -> 9:16: center-crop and scale to 1080x1920
             cmd = [
               "ffmpeg", "-y",
               "-i", in_path,
@@ -89,13 +88,11 @@ jobs:
             return send_file(out_path, as_attachment=True, download_name="converted_9x16.mp4")
 
           if __name__ == "__main__":
-            # Important: bind to 0.0.0.0 so the tunnel can reach it
             app.run(host="0.0.0.0", port=8080)
           PY
 
       - name: Start server (background)
         env:
-          # Create this repo secret in GitHub: Settings -> Secrets and variables -> Actions
           AUTH_TOKEN: ${{ secrets.CONVERTER_TOKEN }}
           WORKDIR: /tmp/work
         run: |
@@ -103,40 +100,44 @@ jobs:
           sleep 1
           curl -fsS http://127.0.0.1:8080/ >/dev/null
 
-      - name: Expose public URL
-        uses: codetalkio/expose-tunnel@v1.5.0
-        id: expose-tunnel
-        with:
-          service: localhost.run
-          port: 8080
-
-      - name: Sanitize tunnel URL
+      - name: Start localhost.run tunnel (background) + capture URL
         id: tunnel
         shell: bash
         run: |
-          raw='${{ steps.expose-tunnel.outputs.tunnel-url }}'
-          echo "RAW=$raw"
-      
-          # Extract the first https:// URL (works even if raw contains markdown like [url](url))
-          clean="$(printf '%s' "$raw" | grep -oE 'https://[^])[:space:]]+' | head -n 1)"
-      
-          if [ -z "$clean" ]; then
-            echo "Failed to extract URL from: $raw" >&2
-            exit 1
-          fi
-      
-          echo "clean=$clean" >> "$GITHUB_OUTPUT"
-          echo "Clean URL: $clean"
+          set -euo pipefail
 
+          # localhost.run free tunnels can use the "nokey" user. [web:90]
+          # HTTP tunnels documented as: ssh -R 80:localhost:8080 nokey@localhost.run [web:45]
+          nohup ssh \
+            -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            -o ExitOnForwardFailure=yes \
+            -R 80:localhost:8080 nokey@localhost.run \
+            > tunnel.log 2>&1 &
 
+          # Wait for the first https:// URL to appear in the log.
+          for i in $(seq 1 60); do
+            url="$(grep -oE 'https://[a-zA-Z0-9.-]+' tunnel.log | head -n 1 || true)"
+            if [ -n "$url" ]; then
+              echo "url=$url" >> "$GITHUB_OUTPUT"
+              echo "Tunnel URL: $url"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Failed to obtain tunnel URL. tunnel.log:" >&2
+          tail -200 tunnel.log >&2
+          exit 1
 
       - name: Print URL
         run: |
-          echo "Open this URL: ${{ steps.tunnel.outputs.clean }}"
-      
-      - name: Health check
+          echo "Open this URL: ${{ steps.tunnel.outputs.url }}"
+          echo "It will stay up for ~${{ inputs.keep_alive_minutes }} minutes."
+
+      - name: Health check (via public URL)
         run: |
-          curl -fsS --max-time 20 "${{ steps.tunnel.outputs.clean }}" >/dev/null
+          curl -fsS --max-time 20 "${{ steps.tunnel.outputs.url }}" >/dev/null
           echo "OK"
 
       - name: Keep alive
