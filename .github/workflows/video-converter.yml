@@ -111,24 +111,43 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Cloudflare docs: start a free quick tunnel with:
-          # cloudflared tunnel --url http://localhost:8080
           nohup ./cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
 
-          # Wait for the trycloudflare.com URL to appear
+          # 1) Extract clean URL
+          url=""
           for i in $(seq 1 60); do
-            url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)"
+            url="$(grep -oE 'https://[A-Za-z0-9.-]+\.trycloudflare\.com/?' tunnel.log | head -n 1 || true)"
             if [ -n "$url" ]; then
-              echo "url=$url" >> "$GITHUB_OUTPUT"
-              echo "Tunnel URL: $url"
-              exit 0
+              break
             fi
             sleep 1
           done
 
-          echo "Failed to obtain trycloudflare.com URL. tunnel.log:" >&2
-          tail -200 tunnel.log >&2
-          exit 1
+          if [ -z "$url" ]; then
+            echo "Failed to obtain trycloudflare.com URL. tunnel.log:" >&2
+            tail -200 tunnel.log >&2
+            exit 1
+          fi
+
+          # 2) Wait for DNS to resolve on the runner
+          host="$(echo "$url" | sed -E 's#https?://##; s#/.*##')"
+          echo "Waiting for DNS to resolve: $host"
+          for i in $(seq 1 60); do
+            if getent hosts "$host" >/dev/null 2>&1; then
+              echo "DNS OK"
+              break
+            fi
+            sleep 1
+          done
+
+          if ! getent hosts "$host" >/dev/null 2>&1; then
+            echo "DNS still not resolving for $host" >&2
+            tail -200 tunnel.log >&2
+            exit 1
+          fi
+
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Tunnel URL: $url"
 
       - name: Print URL
         run: |
@@ -136,9 +155,15 @@ jobs:
           echo "It will stay up for ~${{ inputs.keep_alive_minutes }} minutes."
 
       - name: Health check (via public URL)
+        shell: bash
         run: |
-          curl -fsS --max-time 20 "${{ steps.tunnel.outputs.url }}" >/dev/null
+          url='${{ steps.tunnel.outputs.url }}'
+          # Extra safety in case anything adds formatting:
+          clean="$(printf '%s' "$url" | grep -oE 'https://[A-Za-z0-9.-]+\.trycloudflare\.com/?' | head -n 1)"
+          echo "Checking: $clean"
+          curl -fsS --max-time 20 "$clean" >/dev/null
           echo "OK"
+
 
       - name: Keep alive
         run: |
