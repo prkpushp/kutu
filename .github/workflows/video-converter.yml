@@ -99,46 +99,36 @@ jobs:
           sleep 1
           curl -fsS http://127.0.0.1:8080/ >/dev/null
 
-      - name: Start localhost.run tunnel + capture URL (robust)
+      - name: Download cloudflared
+        run: |
+          curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          ./cloudflared --version
+
+      - name: Start Cloudflare Quick Tunnel + capture URL
         id: tunnel
         shell: bash
         run: |
           set -euo pipefail
-      
-          nohup ssh \
-            -o StrictHostKeyChecking=no \
-            -o ServerAliveInterval=60 \
-            -o ExitOnForwardFailure=yes \
-            -R 80:localhost:8080 nokey@localhost.run \
-            > tunnel.log 2>&1 &
-          ssh_pid=$!
-      
-          # Wait for the tunnel URL to appear
-          url=""
-          for i in $(seq 1 90); do
-            # Only accept real tunnel domains (avoid banner links)
-            url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.lhr\.life' tunnel.log | head -n 1 || true)"
-      
-            # Ensure ssh is still running
-            if ! kill -0 "$ssh_pid" 2>/dev/null; then
-              echo "SSH tunnel process exited early." >&2
-              tail -200 tunnel.log >&2
-              exit 1
-            fi
-      
+
+          # Cloudflare docs: start a free quick tunnel with:
+          # cloudflared tunnel --url http://localhost:8080
+          nohup ./cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+
+          # Wait for the trycloudflare.com URL to appear
+          for i in $(seq 1 60); do
+            url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)"
             if [ -n "$url" ]; then
               echo "url=$url" >> "$GITHUB_OUTPUT"
               echo "Tunnel URL: $url"
               exit 0
             fi
-      
             sleep 1
           done
-      
-          echo "Timed out waiting for tunnel URL." >&2
+
+          echo "Failed to obtain trycloudflare.com URL. tunnel.log:" >&2
           tail -200 tunnel.log >&2
           exit 1
-
 
       - name: Print URL
         run: |
