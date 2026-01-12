@@ -39,7 +39,6 @@ jobs:
           from flask import Flask, request, send_file, abort
 
           app = Flask(__name__)
-
           AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
           WORKDIR = os.environ.get("WORKDIR", "/tmp/work")
           os.makedirs(WORKDIR, exist_ok=True)
@@ -100,14 +99,14 @@ jobs:
           sleep 1
           curl -fsS http://127.0.0.1:8080/ >/dev/null
 
-      - name: Start localhost.run tunnel (background) + capture URL
+      - name: Start localhost.run tunnel + capture URL
         id: tunnel
         shell: bash
         run: |
           set -euo pipefail
 
-          # localhost.run free tunnels can use the "nokey" user. [web:90]
-          # HTTP tunnels documented as: ssh -R 80:localhost:8080 nokey@localhost.run [web:45]
+          # Free tunnels: use nokey@ (per localhost.run FAQ). [web:90]
+          # HTTP tunnel: forward remote port 80 to local 8080 (per docs). [web:45]
           nohup ssh \
             -o StrictHostKeyChecking=no \
             -o ServerAliveInterval=30 \
@@ -115,9 +114,11 @@ jobs:
             -R 80:localhost:8080 nokey@localhost.run \
             > tunnel.log 2>&1 &
 
-          # Wait for the first https:// URL to appear in the log.
-          for i in $(seq 1 60); do
-            url="$(grep -oE 'https://[a-zA-Z0-9.-]+' tunnel.log | head -n 1 || true)"
+          # Wait for the REAL tunnel URL.
+          # Important: localhost.run banner includes a Twitter link; ignore it by only
+          # accepting *.lhr.life or *.localhost.run URLs. [web:45]
+          for i in $(seq 1 90); do
+            url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.(lhr\.life|localhost\.run)' tunnel.log | head -n 1 || true)"
             if [ -n "$url" ]; then
               echo "url=$url" >> "$GITHUB_OUTPUT"
               echo "Tunnel URL: $url"
@@ -126,7 +127,7 @@ jobs:
             sleep 1
           done
 
-          echo "Failed to obtain tunnel URL. tunnel.log:" >&2
+          echo "Failed to obtain tunnel URL. Last tunnel.log lines:" >&2
           tail -200 tunnel.log >&2
           exit 1
 
