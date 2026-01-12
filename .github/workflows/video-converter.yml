@@ -114,11 +114,20 @@ jobs:
         id: tunnel
         shell: bash
         run: |
-          raw="${{ steps.expose-tunnel.outputs.tunnel-url }}"
-          # Keep only the first token and strip any trailing punctuation/brackets
-          clean="$(echo "$raw" | awk '{print $1}' | sed 's/[][()]//g' )"
+          raw='${{ steps.expose-tunnel.outputs.tunnel-url }}'
+          echo "RAW=$raw"
+      
+          # Extract the first https:// URL (works even if raw contains markdown like [url](url))
+          clean="$(printf '%s' "$raw" | grep -oE 'https://[^])[:space:]]+' | head -n 1)"
+      
+          if [ -z "$clean" ]; then
+            echo "Failed to extract URL from: $raw" >&2
+            exit 1
+          fi
+      
           echo "clean=$clean" >> "$GITHUB_OUTPUT"
           echo "Clean URL: $clean"
+
 
 
       - name: Print URL
@@ -128,7 +137,7 @@ jobs:
       - name: Health check
         run: |
           curl -fsS --max-time 20 "${{ steps.tunnel.outputs.clean }}" >/dev/null
-
+          echo "OK"
 
       - name: Keep alive
         run: |
