@@ -110,18 +110,23 @@ jobs:
           service: localhost.run
           port: 8080
 
+      - name: Sanitize tunnel URL
+        id: tunnel
+        shell: bash
+        run: |
+          raw="${{ steps.expose-tunnel.outputs.tunnel-url }}"
+          # Keep only the first token and strip any trailing punctuation/brackets
+          clean="$(echo "$raw" | awk '{print $1}' | sed 's/[][()]//g' )"
+          echo "clean=$clean" >> "$GITHUB_OUTPUT"
+          echo "Clean URL: $clean"
+
 
       - name: Print URL
-        run: |
-          echo "Open this URL: ${{ steps.expose-tunnel.outputs.tunnel-url }}"
-          echo "It will stay up for ~${{ inputs.keep_alive_minutes }} minutes."
+        run: echo "Open this URL: ${{ steps.tunnel.outputs.clean }}"
+      
+      - name: Health check
+        run: curl -fsS --max-time 20 "${{ steps.tunnel.outputs.clean }}" >/dev/null
 
-      - name: Health check (from runner via public URL)
-        run: |
-          url="${{ steps.expose-tunnel.outputs.tunnel-url }}"
-          echo "Testing: $url"
-          curl -fsS --max-time 20 "$url" >/dev/null
-          echo "OK"
 
       - name: Keep alive
         run: |
