@@ -99,38 +99,46 @@ jobs:
           sleep 1
           curl -fsS http://127.0.0.1:8080/ >/dev/null
 
-      - name: Start localhost.run tunnel + capture URL
+      - name: Start localhost.run tunnel + capture URL (robust)
         id: tunnel
         shell: bash
         run: |
           set -euo pipefail
-
-          # Free tunnels: use nokey@ (per localhost.run FAQ). [web:90]
-          # HTTP tunnel: forward remote port 80 to local 8080 (per docs). [web:45]
+      
           nohup ssh \
             -o StrictHostKeyChecking=no \
-            -o ServerAliveInterval=30 \
+            -o ServerAliveInterval=60 \
             -o ExitOnForwardFailure=yes \
             -R 80:localhost:8080 nokey@localhost.run \
             > tunnel.log 2>&1 &
-
-          # Wait for the REAL tunnel URL.
-          # Important: localhost.run banner includes a Twitter link; ignore it by only
-          # accepting *.lhr.life or *.localhost.run URLs. [web:45]
+          ssh_pid=$!
+      
+          # Wait for the tunnel URL to appear
+          url=""
           for i in $(seq 1 90); do
+            # Only accept real tunnel domains (avoid banner links)
             url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.lhr\.life' tunnel.log | head -n 1 || true)"
+      
+            # Ensure ssh is still running
+            if ! kill -0 "$ssh_pid" 2>/dev/null; then
+              echo "SSH tunnel process exited early." >&2
+              tail -200 tunnel.log >&2
+              exit 1
+            fi
+      
             if [ -n "$url" ]; then
               echo "url=$url" >> "$GITHUB_OUTPUT"
               echo "Tunnel URL: $url"
               exit 0
             fi
+      
             sleep 1
           done
-
-
-          echo "Failed to obtain tunnel URL. Last tunnel.log lines:" >&2
+      
+          echo "Timed out waiting for tunnel URL." >&2
           tail -200 tunnel.log >&2
           exit 1
+
 
       - name: Print URL
         run: |
