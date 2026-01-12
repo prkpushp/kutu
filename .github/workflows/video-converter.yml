@@ -1,16 +1,12 @@
-name: Temporary Video Converter (16:9 -> 9:16)
+name: Temporary 16:9 -> 9:16 Converter
 
 on:
   workflow_dispatch:
     inputs:
       keep_alive_minutes:
-        description: "How long to keep the public URL alive"
+        description: "Keep the URL alive for N minutes"
         required: true
         default: "45"
-      auth_token:
-        description: "Simple shared token (also store in secrets if preferred)"
-        required: true
-        default: "changeme"
 
 jobs:
   serve:
@@ -31,17 +27,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install server deps
+      - name: Install Flask
         run: |
           python -m pip install --upgrade pip
           pip install flask
 
-      - name: Create minimal web app
+      - name: Create app (upload -> ffmpeg -> download)
         run: |
           cat > app.py << 'PY'
-          import os
-          import subprocess
-          import uuid
+          import os, subprocess, uuid
           from flask import Flask, request, send_file, abort
 
           app = Flask(__name__)
@@ -52,7 +46,7 @@ jobs:
 
           HTML = """<!doctype html>
           <html>
-            <head><meta charset="utf-8"><title>16:9 to 9:16 Converter</title></head>
+            <head><meta charset="utf-8"><title>Video Converter</title></head>
             <body>
               <h3>16:9 → 9:16 (center crop)</h3>
               <form action="/convert" method="post" enctype="multipart/form-data">
@@ -60,7 +54,6 @@ jobs:
                 <input type="file" name="video" accept="video/*" required />
                 <button type="submit">Convert</button>
               </form>
-              <p>Tip: Keep videos short (~1 min) for faster processing.</p>
             </body>
           </html>"""
 
@@ -78,13 +71,12 @@ jobs:
             if not f:
               abort(400, "No file uploaded")
 
-            job_id = str(uuid.uuid4())
-            in_path = os.path.join(WORKDIR, f"in_{job_id}.mp4")
-            out_path = os.path.join(WORKDIR, f"out_{job_id}.mp4")
+            job = str(uuid.uuid4())
+            in_path = os.path.join(WORKDIR, f"in_{job}.mp4")
+            out_path = os.path.join(WORKDIR, f"out_{job}.mp4")
             f.save(in_path)
 
-            # Convert 16:9 -> 9:16 by center-cropping to 9:16 and scaling to 1080x1920.
-            # crop=ih*9/16:ih -> make width = height*9/16 (portrait crop), keep full height, centered.
+            # 16:9 -> 9:16: center-crop and scale to 1080x1920
             cmd = [
               "ffmpeg", "-y",
               "-i", in_path,
@@ -93,37 +85,44 @@ jobs:
               "-c:a", "aac", "-b:a", "128k",
               out_path
             ]
-
             subprocess.run(cmd, check=True)
-
             return send_file(out_path, as_attachment=True, download_name="converted_9x16.mp4")
 
           if __name__ == "__main__":
+            # Important: bind to 0.0.0.0 so the tunnel can reach it
             app.run(host="0.0.0.0", port=8080)
           PY
 
-      - name: Start web server (background)
+      - name: Start server (background)
         env:
-          AUTH_TOKEN: ${{ inputs.auth_token }}
+          # Create this repo secret in GitHub: Settings -> Secrets and variables -> Actions
+          AUTH_TOKEN: ${{ secrets.CONVERTER_TOKEN }}
           WORKDIR: /tmp/work
         run: |
           nohup python app.py > server.log 2>&1 &
           sleep 1
           curl -fsS http://127.0.0.1:8080/ >/dev/null
 
-      - name: Expose public tunnel URL
+      - name: Expose public URL (with fallback)
         uses: codetalkio/expose-tunnel@v1.5.0
         id: expose-tunnel
         with:
           service: bore.pub
           port: 8080
-        # This action supports services like bore.pub/localhost.run and exposes tunnel-url as an output. [page:1]
+          fallback: '["localhost.run","bore.pub"]'
 
-      - name: Show URL in logs
+      - name: Print URL
         run: |
           echo "Open this URL: ${{ steps.expose-tunnel.outputs.tunnel-url }}"
           echo "It will stay up for ~${{ inputs.keep_alive_minutes }} minutes."
 
-      - name: Keep tunnel alive
+      - name: Health check (from runner via public URL)
+        run: |
+          url="${{ steps.expose-tunnel.outputs.tunnel-url }}"
+          echo "Testing: $url"
+          curl -fsS --max-time 20 "$url" >/dev/null
+          echo "OK"
+
+      - name: Keep alive
         run: |
           timeout ${{ inputs.keep_alive_minutes }}m sleep 7200
