@@ -111,14 +111,22 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Cloudflare Quick Tunnels: generates a random trycloudflare.com subdomain and proxies to localhost. [page:5]
           nohup ./cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+          cf_pid=$!
 
-          # 1) Extract clean URL
+          # Wait for URL
           url=""
-          for i in $(seq 1 60); do
+          for i in $(seq 1 90); do
             url="$(grep -oE 'https://[A-Za-z0-9.-]+\.trycloudflare\.com/?' tunnel.log | head -n 1 || true)"
             if [ -n "$url" ]; then
               break
+            fi
+            # If cloudflared died, fail early and show logs
+            if ! kill -0 "$cf_pid" 2>/dev/null; then
+              echo "cloudflared exited early. tunnel.log:" >&2
+              tail -200 tunnel.log >&2
+              exit 1
             fi
             sleep 1
           done
@@ -129,7 +137,7 @@ jobs:
             exit 1
           fi
 
-          # 2) Wait for DNS to resolve on the runner
+          # Wait for DNS on the runner (helps avoid early curl failures)
           host="$(echo "$url" | sed -E 's#https?://##; s#/.*##')"
           echo "Waiting for DNS to resolve: $host"
           for i in $(seq 1 60); do
@@ -140,12 +148,6 @@ jobs:
             sleep 1
           done
 
-          if ! getent hosts "$host" >/dev/null 2>&1; then
-            echo "DNS still not resolving for $host" >&2
-            tail -200 tunnel.log >&2
-            exit 1
-          fi
-
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "Tunnel URL: $url"
 
@@ -154,16 +156,42 @@ jobs:
           echo "Open this URL: ${{ steps.tunnel.outputs.url }}"
           echo "It will stay up for ~${{ inputs.keep_alive_minutes }} minutes."
 
-      - name: Health check (via public URL)
+      - name: Health check (retry)
         shell: bash
         run: |
+          set -euo pipefail
           url='${{ steps.tunnel.outputs.url }}'
-          # Extra safety in case anything adds formatting:
-          clean="$(printf '%s' "$url" | grep -oE 'https://[A-Za-z0-9.-]+\.trycloudflare\.com/?' | head -n 1)"
-          echo "Checking: $clean"
-          curl -fsS --max-time 20 "$clean" >/dev/null
-          echo "OK"
+          echo "Checking: $url"
 
+          # Retry because Quick Tunnels can take a bit to become routable end-to-end. [page:5]
+          for i in $(seq 1 30); do
+            code="$(curl -sS -o /dev/null -m 10 -w '%{http_code}' "$url" || true)"
+            echo "Attempt $i: HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "OK"
+              exit 0
+            fi
+
+            # If you get 530, Cloudflare says it means it cannot resolve/connect to the origin; body contains a 1XXX code. [page:6]
+            if [ "$code" = "530" ]; then
+              echo "Got HTTP 530; dumping a snippet for the 1XXX code:"
+              curl -sS -m 10 "$url" | head -n 40 || true
+            fi
+
+            sleep 2
+          done
+
+          echo "Health check failed. tunnel.log (last 200 lines):"
+          tail -200 tunnel.log || true
+          exit 1
+
+      - name: Debug logs (always)
+        if: always()
+        run: |
+          echo "==== server.log (last 200) ===="
+          tail -200 server.log || true
+          echo "==== tunnel.log (last 200) ===="
+          tail -200 tunnel.log || true
 
       - name: Keep alive
         run: |
