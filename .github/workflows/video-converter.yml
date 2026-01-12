@@ -122,10 +122,12 @@ jobs:
 
 
       - name: Print URL
-        run: echo "Open this URL: ${{ steps.tunnel.outputs.clean }}"
+        run: |
+          echo "Open this URL: ${{ steps.tunnel.outputs.clean }}"
       
       - name: Health check
-        run: curl -fsS --max-time 20 "${{ steps.tunnel.outputs.clean }}" >/dev/null
+        run: |
+          curl -fsS --max-time 20 "${{ steps.tunnel.outputs.clean }}" >/dev/null
 
 
       - name: Keep alive
